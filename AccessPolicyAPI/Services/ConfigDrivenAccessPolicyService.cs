@@ -21,8 +21,8 @@ public class ConfigDrivenAccessPolicyService : IAccessPolicyService
         bool projectMatch = string.Equals(project, _options.RequiredProject, StringComparison.OrdinalIgnoreCase);
         bool roleMatch = _options.AllowedRoles.Any(role => user.IsInRole(role) || roles.Contains(role));
 
-        // This policy should pertain only to the user principal (subject), not the client app.
-        // Checking client app's attributes (consented scope) along with subject's roles and claims
+        // This policy should pertain only to the user principal (subject), not the client app (actor).
+        // Checking actor's attributes (consented scope) along with subject's roles and claims
         // together in one location is not great, and the scope check should be refactored out elsewhere.
         bool scopeMatch = scopes.Contains(_options.RequiredScope);
 
