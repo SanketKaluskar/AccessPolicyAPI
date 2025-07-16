@@ -19,8 +19,8 @@ Access decisions are made dynamically based on these attributes, enabling contex
 Authorization is enforced using custom policies and handlers:
 
 - **Policies**: Defined in `Program.cs` (e.g., `JuhuAdminPolicy`, `JuhuUserPolicy`), requirements handled by `ProjectAndRoleHandler`.
-- **Handler**: `ProjectAndRoleHandler` evaluates both role and project claims using `IAccessPolicyService.AccessCheck` implemented by `ConfigDrivenAccessPolicyService`.
-- **Claims Used**: `Role`, `Project`, and `Scope`. `Scope` is an actor claim while `Role` and `Project` are Subject claims.
+- **Handler**: `ProjectAndRoleHandler` evaluates access token claims using `IAccessPolicyService.AccessCheck` implemented by `ConfigDrivenAccessPolicyService`.
+- **Claims Used**: `Scope` (**Actor** claim), `Project`, and `Role` (**Subject** claims). 
 
 Example flow:
 1. User requests a secure resource (e.g., `GET /api/secure/files`).
