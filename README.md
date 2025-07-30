@@ -1,64 +1,144 @@
-# AccessPolicyAPI
+# AI Agents and Tenant/User Isolation
 
-## Overview
-AccessPolicyAPI is a .NET 9 Web API project designed to demonstrate fine-grained authorization using both Role-Based Access Control (RBAC) and Attribute-Based Access Control (ABAC). 
-The API secures access to project resources by evaluating user roles and project-specific attributes.
+## Motivation
 
-## Authorization Model
+Autonomous agents are increasingly operating alongside traditional services - enriching identity tokens, interpreting behavioral telemetry and driving access decisions. 
+However, they often interact with sensitive, user or tenant scoped data. Without strict identity and scope enforcement, agents risk bridging isolation boundaries by 
+injecting claims or making decisions outside their authorized domain.
 
-### Role-Based Access Control (RBAC)
-RBAC restricts access based on the roles assigned to users. In this project, roles are extracted from user claims and checked against allowed roles for each project. 
-Example roles might include "Admin" or "User" for a given project.
+---
 
-### Attribute-Based Access Control (ABAC)
-ABAC extends authorization by evaluating a wide range of attributes extracted from the access token (JWT) and runtime context. 
-These attributes can include user properties (e.g., assigned project, department) as well as environmental conditions like time of day, location, and device posture. 
-Access decisions are made dynamically based on these attributes, enabling context-aware policies that go beyond static roles.
+## The Core Risk: Excessive Agency
 
-### Combined RBAC & ABAC Enforcement
-Authorization is enforced using custom policies and handlers:
+Per [OWASP LLM08 – Excessive Agency](https://genai.owasp.org/llmrisk2023-24/llm08-excessive-agency/), agents should never act beyond their authorized scope. 
 
-- **Policies**: Defined in `Program.cs` (e.g., `JuhuAdminPolicy`, `JuhuUserPolicy`), requirements handled by `ProjectAndRoleHandler`.
-- **Handler**: `ProjectAndRoleHandler` evaluates access token claims using `IAccessPolicyService.AccessCheck` implemented by `ConfigDrivenAccessPolicyService`.
-- **Claims Used**: `Scope` (**Actor** claim), `Project`, and `Role` (**Subject** claims). 
+In systems that rely on user delegated permissions to agent, this includes:
+- Losing user context when making service to service calls
+- Not verifying user context at each service boundary
+- Making access decisions without intersecting agent and user scopes
 
-Example flow:
-1. User requests a secure resource (e.g., `GET /api/secure/files`).
-2. The API checks the policy requirements, which includes the user's claims for project, role and client app's consented scope.
-3. Access is granted only if the role is any of the allowed roles and project, scope exactly match those required.
+In systems without user delegation, this includes:
+- Optional agent authentication, leading to agents acting without proper identity
+- Applying ML heuristics globally without regard for data isolation, e.g., tenant or user boundaries
+- Making access decisions without considering agent scope
 
-## Claims Mapping in Azure AD
-AccessPolicyAPI uses Azure AD **claims mapping policies** to inject project-specific attributes directly into JWT access tokens. This eliminates the need for runtime directory lookups.
+These behaviors constitute excessive agency — leading to cross-tenant leakage, unauthorized privilege escalation, and governance violations.
 
-### How It Works
-- An **Azure AD schema extension** (e.g., `ext6ed5rv6m_sankalDirectoryExtproject.project`) is used to assign a `"project"` value to a user (e.g., `"Juhu"`).
-- A **claims mapping policy** is created to include this extension attribute as a custom JWT claim.
-- The policy is attached to the resource app (`AccessPolicyAPI`) so every token issued to it for a user includes the claim:
-  
-  ```json
-  "project": "Juhu"
-  ```
+---
 
-### Real-World Use Case
-When a user begins working on a specific project, a tenant admin (or provisioning script) updates their Azure AD profile with the project assignment. 
-This assignment flows into every access token issued to the API, enabling attribute-based authorization without additional API or Graph calls.
+## Architectural Solution: Token-Based Identity, Tenant/User Claims Verification
 
-## Key Files
-- `Authorization/ProjectAndRoleRequirement.cs`: Defines the custom authorization requirement.
-- `Authorization/ProjectAndRoleHandler.cs`: Implements the logic for RBAC and ABAC checks.
-- `Models/ProjectPolicyOptions.cs`: Configures allowed roles and required project/scope.
-- `Controllers/SecureController.cs`: Example controller using the authorization policy.
+### An agent that is authorized to access a user's resource should:
+1. Authenticate via OAuth2
+- Use client credentials flow to obtain a scoped access token, asserting the agent's identity.
+- Possess the user's access token, asserting the user's identity and scope.
+- Exchange the above tokens for a new token that includes both actor (agent) and subject (user) claims along with the delegated scope.
+- Effect user consent (required) for the delegation, typically out of band (implementation specific).
+2. Require user and tenant scoped enforcement at the Resource
+- Validate agent and user scopes, roles.
 
-## Usage
-1. Configure claims to include `Role`, `Project` and `Scope`.
-2. Apply authorization policies to controllers or actions.
-3. Make a GET request to the API and include a JWT in the Authorization header as a Bearer token.
-1. The API will automatically enforce RBAC and ABAC rules for each request.
+### Token Exchange Issued Claims (example)
+```
+{
+  "aud": "api://resource",
+  "iss": "https://as.example.com",
+  "exp": 1756457796,
+  "nbf": 1756454196,
+  "iat": 1756454196,
+  "sub": "wIy3itAYUu5NsPeaXqZZj3CeUYnhY77fYS0w0KqYgaA",
+  "name": "Admin TestUser",
+  "tenant_id": "49636e46-3ba7-468d-904f-34b07f1eb62d",
+  "unique_name": "admintestuser@sanketkaluskarhotmail.onmicrosoft.com",
+  "upn": "admintestuser@sanketkaluskarhotmail.onmicrosoft.com"
+  "roles": [
+    "Admin"
+  ],
+  "act": {
+    "sub": "agent92701",
+    "client_id": "f1211c46-...",
+    "app_name": "WebAgentService",
+    "tenant_id": "49636e46-3ba7-468d-904f-34b07f1eb62d",
+    "identitytype": "agent",
+    "role": "ReviewAssistant"
+  },
+  "scope": "Files.Read.All",
+  "client_id": "2a41fld7-..."
+}
+```
 
-## Technologies
-- .NET 9
-- ASP.NET Core Authorization
-- Swagger/OpenAPI
+### Enforcement Policy (Pseudocode)
+```
+// Checks for "aud" and "iss" intentionally omitted for clarity
+// JWT signature verification also omitted for clarity
 
-## License
-This project is provided for demonstration purposes.
+allowed_agent_roles = ["ReviewAssistant", ...]
+if identitytype == "agent":
+    if actor.scope not in allowed_agent_roles:
+        deny("Agent not authorized")
+    elif actor.tenant_id != user.tenant_id:
+        deny("Agent not authorized")
+```
+This ensures that enriched claims are only injected by agents explicitly scoped to the same tenant 
+as the user — protecting sovereignty, integrity, and auditability.
+
+
+### Token Exchange
+Also know as the On-Behalf-Of (OBO) flow, it is formalized via the [OAuth 2.0 Token Exchange RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693).
+- Azure AD supports OBO via a the [Azure AD On-Behalf-Of flow](https://learn.microsoft.com/en-us/azure/active-directory/develop/v2-oauth-on-behalf-of-flow), 
+although it does not support separated actor and subject claims. 
+- Okta supports OBO via the [Okta On-Behalf-Of flow](https://developer.okta.com/docs/concepts/obo/), which does support separated actor and subject claims.
+- Note that in a multi-hop OBO chain, each agent only sees:
+  - The user identity, and 
+  - The immediate caller's identity (the previous agent in the chain) - by design
+
+
+### UML Sequence Diagram: Agent Delegated Access via OBO/Token Exchange
+![Agent OBO Access](AgentObo.png)
+
+---
+
+### An agent that operates without a user context should:
+1. Be called by the API Gateway, before calling the Resource
+2. Authenticate via OAuth2
+- Use client credentials flow to obtain a scoped access token, asserting the agent's identity.
+3. Produce an Enriched Token with claims based on agent input, such as:
+- Entropy and Velocity scores from a ML model.
+- Other agent-specific claims, such as risk scores or behavioral telemetry.
+- The enriched token should include the access token, to bind the agent's identity to the enriched claims.
+- The API Gateway passes the enriched token to the Resource (X-Enriched-JWT header), along with the original token (Authorization header).
+4. Require user and tenant scoped enforcement at the Resource
+- ABAC engine validates that the agent's tenant/domain matches the subject's.
+- Validate agent and user scopes.
+5. Log enrichment provenance
+    - Tokens and claims must record which agent performed enrichment and under what scope.
+
+### Resource Request with Enriched Token
+```
+POST /resource
+Authorization: Bearer eyJhbGciOi...
+X-Enriched-JWT: {
+  "actorToken": "eyJhbGciOiJIUzI...",
+  "bot_score_": 23,
+  "entropy": "d4f8a2c9e1b7a6f3",
+  "velocity": {
+      "actionsPerMinute": 85,
+      "avgLatencyMs": 40,
+      "burstScore": 0.92
+  }
+}
+```
+
+### Enforcement Policy (Pseudocode)
+```
+// Checks for "aud" and "iss" intentionally omitted for clarity
+// JWT signature verification also omitted for clarity
+
+if actor.tenant_id != user.tenant_id or actor.scope != "agent.enrich":
+    deny("Agent not authorized")
+```
+This ensures that enriched claims are only injected by agents explicitly scoped to the same tenant as the user.
+
+### UML Sequence Diagram: Agent Access without User Context
+![Scoped AI Agent Access](ScopedAIAgentAccess.png)
+
+---
